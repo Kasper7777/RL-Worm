@@ -30,15 +30,28 @@ class WormEnv(gym.Env):
             dtype=np.float32
         )
         
-        # Define observation space
+        # Define observation space (now includes stair information)
+        obs_dim = (2 * self.num_joints  # joint positions and velocities
+                  + 7  # base position (3) and orientation (4)
+                  + 3  # food position
+                  + 3)  # closest stair position
+        
         self.observation_space = spaces.Box(
             low=-np.inf,
             high=np.inf,
-            shape=(2 * self.num_joints + 7 + 3,),  # joints pos/vel + base pos/orient + food pos
+            shape=(obs_dim,),
             dtype=np.float32
         )
         
+        # Stair parameters
+        self.num_stairs = 5
+        self.stair_height = 0.05
+        self.stair_width = 0.2
+        self.stair_depth = 0.2
+        self.stairs = []  # Store stair IDs
+        
         self.previous_x = 0
+        self.previous_height = 0
         self.steps_since_reset = 0
         self.plane_id = None
         self.worm_id = None
@@ -47,21 +60,21 @@ class WormEnv(gym.Env):
         self.prev_distance_to_food = None
         self.max_steps = 2000
         
-        # Updated parameters
-        self.food_spawn_radius = 0.5  # Reduced radius for easier targets
-        self.food_spawn_min_dist = 0.2  # Reduced minimum distance
+        # Updated parameters for more realistic movement
+        self.food_spawn_radius = 0.5
+        self.food_spawn_min_dist = 0.2
         self.food_size = 0.05
         self.max_spawn_attempts = 50
         
-        # Slower physics parameters
-        self.max_joint_velocity = 1.0  # Reduced maximum velocity
-        self.sim_steps_per_action = 2  # Fewer steps for smoother visualization
+        # Physics parameters for more realistic movement
+        self.max_joint_velocity = 0.5  # Even slower maximum velocity
+        self.sim_steps_per_action = 4  # More simulation steps for stability
         
-        # Updated control parameters
-        self.joint_damping = 0.2  # Increased damping for slower movement
-        self.position_gain = 0.3
-        self.velocity_gain = 0.3
-        self.max_force = 3.0  # Reduced force for gentler movement
+        # Updated control parameters for better ground contact
+        self.joint_damping = 0.5  # Higher damping to prevent erratic movement
+        self.position_gain = 0.5  # Increased position control
+        self.velocity_gain = 0.5  # Increased velocity control
+        self.max_force = 1.0  # Lower force to prevent jumping
         
         # Phase parameters for undulation
         self.target_phase_diff = np.pi / 2
@@ -223,6 +236,48 @@ class WormEnv(gym.Env):
             print(f"Error spawning food: {e}")
             return False
 
+    def _create_stairs(self):
+        """Create a staircase in the environment."""
+        for i in range(self.num_stairs):
+            # Calculate stair position
+            x = 0.5 + i * self.stair_depth  # Start stairs 0.5 units away
+            y = 0
+            z = (i + 1) * self.stair_height / 2  # Half height because URDF box center is at middle
+            
+            # Create collision shape
+            col_id = p.createCollisionShape(
+                shapeType=p.GEOM_BOX,
+                halfExtents=[self.stair_depth/2, self.stair_width/2, (i + 1) * self.stair_height/2]
+            )
+            
+            # Create visual shape
+            vis_id = p.createVisualShape(
+                shapeType=p.GEOM_BOX,
+                halfExtents=[self.stair_depth/2, self.stair_width/2, (i + 1) * self.stair_height/2],
+                rgbaColor=[0.8, 0.8, 0.8, 1]
+            )
+            
+            # Create body
+            stair_id = p.createMultiBody(
+                baseMass=0,  # Static body
+                baseCollisionShapeIndex=col_id,
+                baseVisualShapeIndex=vis_id,
+                basePosition=[x, y, z]
+            )
+            
+            # Set high friction for stairs
+            p.changeDynamics(
+                stair_id,
+                -1,
+                lateralFriction=2.0,
+                spinningFriction=0.5,
+                rollingFriction=0.5,
+                contactStiffness=10000,
+                contactDamping=100
+            )
+            
+            self.stairs.append(stair_id)
+
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         
@@ -234,6 +289,14 @@ class WormEnv(gym.Env):
                 pass
             self.food_visual_id = None
         
+        # Clean up stairs
+        for stair_id in self.stairs:
+            try:
+                p.removeBody(stair_id)
+            except:
+                pass
+        self.stairs = []
+        
         # Ensure connection
         if not self.connected:
             self._connect_physics()
@@ -242,25 +305,33 @@ class WormEnv(gym.Env):
             p.resetSimulation()
             p.setGravity(0, 0, -9.81)
             
-            # Load ground plane with higher friction
+            # Load ground plane with high friction
             self.plane_id = p.loadURDF("plane.urdf")
-            p.changeDynamics(self.plane_id, -1, 
-                           lateralFriction=1.0,
-                           spinningFriction=0.1,
-                           rollingFriction=0.1)
+            p.changeDynamics(
+                self.plane_id,
+                -1,
+                lateralFriction=2.0,
+                spinningFriction=0.5,
+                rollingFriction=0.5
+            )
             
-            # Load worm
-            self.worm_id = p.loadURDF(self.urdf_path, [0, 0, 0.1])
+            # Create stairs
+            self._create_stairs()
+            
+            # Load worm at the start of stairs
+            self.worm_id = p.loadURDF(self.urdf_path, [0, 0, 0.05])
             
             # Set dynamics properties for all worm links
             for i in range(p.getNumJoints(self.worm_id) + 1):
                 p.changeDynamics(self.worm_id, i-1,
-                               lateralFriction=1.0,
-                               spinningFriction=0.1,
-                               rollingFriction=0.1,
-                               linearDamping=0.1,
-                               angularDamping=0.1,
-                               jointDamping=self.joint_damping)
+                               lateralFriction=1.5,  # Increased friction
+                               spinningFriction=0.3,
+                               rollingFriction=0.3,
+                               linearDamping=0.3,  # Increased damping
+                               angularDamping=0.3,
+                               jointDamping=self.joint_damping,
+                               contactStiffness=10000,  # Added contact stiffness
+                               contactDamping=100)     # Added contact damping
             
             # Initialize joints with a gentler sine wave pattern
             for joint in range(self.num_joints):
@@ -280,6 +351,7 @@ class WormEnv(gym.Env):
             
             # Reset counters and state
             self.previous_x = 0
+            self.previous_height = 0
             self.steps_since_reset = 0
             
             # Try to spawn food and initialize distance
@@ -319,6 +391,21 @@ class WormEnv(gym.Env):
             self.connected = False
             return np.zeros(self.observation_space.shape, dtype=np.float32), {}
 
+    def _get_closest_stair_info(self):
+        """Get information about the closest stair relative to the worm."""
+        worm_pos, _ = p.getBasePositionAndOrientation(self.worm_id)
+        closest_dist = float('inf')
+        closest_stair_pos = [0, 0, 0]
+        
+        for i, stair_id in enumerate(self.stairs):
+            stair_pos = p.getBasePositionAndOrientation(stair_id)[0]
+            dist = np.linalg.norm(np.array(worm_pos) - np.array(stair_pos))
+            if dist < closest_dist:
+                closest_dist = dist
+                closest_stair_pos = stair_pos
+        
+        return closest_stair_pos
+
     def step(self, action):
         if not self.connected:
             try:
@@ -330,21 +417,28 @@ class WormEnv(gym.Env):
         try:
             # Apply actions and step simulation
             for _ in range(self.sim_steps_per_action):
-                # Apply velocity control to joints
+                # Apply velocity control to joints with stronger smoothing
                 for joint in range(self.num_joints):
                     # Scale action to velocity with smoother transitions
                     current_vel = p.getJointState(self.worm_id, joint)[1]
                     target_vel = action[joint] * self.max_joint_velocity
-                    # Smooth velocity changes
-                    desired_vel = current_vel + np.clip(target_vel - current_vel, -0.1, 0.1)
+                    # Even smoother velocity changes
+                    desired_vel = current_vel + np.clip(target_vel - current_vel, -0.05, 0.05)
                     
-                    # Use velocity control
+                    # Use position control with velocity limits
+                    current_pos = p.getJointState(self.worm_id, joint)[0]
+                    target_pos = current_pos + desired_vel * (1/120.)  # Based on timestep
+                    
                     p.setJointMotorControl2(
                         bodyIndex=self.worm_id,
                         jointIndex=joint,
-                        controlMode=p.VELOCITY_CONTROL,
+                        controlMode=p.POSITION_CONTROL,  # Changed to position control
+                        targetPosition=target_pos,
                         targetVelocity=desired_vel,
-                        force=self.max_force
+                        positionGain=self.position_gain,
+                        velocityGain=self.velocity_gain,
+                        force=self.max_force,
+                        maxVelocity=self.max_joint_velocity
                     )
                 
                 p.stepSimulation()
@@ -355,92 +449,50 @@ class WormEnv(gym.Env):
             worm_pos, orientation = p.getBasePositionAndOrientation(self.worm_id)
             
             # Calculate rewards
-            current_distance = np.linalg.norm(np.array(self.food_pos) - np.array(worm_pos))
-            distance_reward = (self.prev_distance_to_food - current_distance) * 20.0  # Increased weight
-            self.prev_distance_to_food = current_distance
+            height_change = worm_pos[2] - self.previous_height
+            self.previous_height = worm_pos[2]
             
-            # Calculate forward progress
+            # Forward progress
             forward_progress = worm_pos[0] - self.previous_x
             self.previous_x = worm_pos[0]
-            progress_reward = forward_progress * 50.0  # Increased weight
             
-            # Softer velocity penalty
-            velocity_penalty = 0
-            for joint in range(self.num_joints):
-                joint_vel = p.getJointState(self.worm_id, joint)[1]
-                velocity_penalty -= 0.0001 * (joint_vel ** 2)  # Reduced penalty
+            # Climbing reward
+            climbing_reward = height_change * 50.0  # Strong incentive for gaining height
+            forward_reward = forward_progress * 30.0  # Reduced emphasis on forward movement
             
-            # Enhanced undulation reward
-            undulation_reward = 0.0
-            joint_positions = [p.getJointState(self.worm_id, i)[0] for i in range(self.num_joints)]
-            
-            # Calculate phase differences between adjacent joints
-            for i in range(self.num_joints - 1):
-                phase_diff = abs(joint_positions[i] - joint_positions[i + 1])
-                # Reward proper phase relationships
-                if abs(phase_diff - self.target_phase_diff) < self.phase_tolerance:
-                    undulation_reward += 1.0  # Increased reward
-            
-            # Encourage alternating joint movements
-            for i in range(self.num_joints - 2):
-                if (joint_positions[i] * joint_positions[i + 2]) < 0:  # Opposite signs
-                    undulation_reward += 0.5
-            
-            # Height reward
-            height_reward = 0.0
-            if 0.01 < worm_pos[2] < 0.1:  # Tighter height range
-                height_reward = 0.5
-            elif worm_pos[2] >= 0.1:
-                height_reward = -0.1 * (worm_pos[2] - 0.1)
-            
-            # Orientation reward
+            # Stability reward
             orientation_euler = p.getEulerFromQuaternion(orientation)
-            orientation_penalty = -0.1 * (abs(orientation_euler[0]) + abs(orientation_euler[2]))
+            stability_penalty = -0.5 * (abs(orientation_euler[0]) + abs(orientation_euler[2]))
             
-            # Base reward for staying alive
-            survival_reward = 0.1
+            # Contact points reward
+            contact_points = p.getContactPoints(self.worm_id)
+            contact_reward = len(contact_points) * 0.1  # Reward for maintaining contact
             
-            # Combine all rewards with updated weights
+            # Combine rewards
             reward = (
-                distance_reward * 0.3 +      # Distance to food
-                progress_reward * 0.3 +      # Forward progress
-                velocity_penalty * 0.05 +    # Velocity penalty (reduced weight)
-                height_reward * 0.1 +        # Height maintenance
-                survival_reward * 0.05 +     # Survival
-                undulation_reward * 0.15 +   # Undulation pattern
-                orientation_penalty * 0.05    # Orientation
+                climbing_reward * 0.4 +    # Emphasis on climbing
+                forward_reward * 0.3 +     # Forward progress
+                stability_penalty * 0.2 +  # Stability
+                contact_reward * 0.1       # Contact maintenance
             )
             
-            # Food collection bonus
-            if current_distance < self.food_size * 2:
-                reward += 20.0  # Increased food reward
-                if not self._spawn_food():
-                    reward -= 1.0  # Reduced penalty
-            
-            self.steps_since_reset += 1
-            
-            # Updated termination conditions
+            # Early termination conditions
             terminated = False
             
-            if worm_pos[2] < 0.005 or worm_pos[2] > 0.2:  # Updated height limits
+            # Terminate if worm flips over
+            if abs(orientation_euler[0]) > 1.2 or abs(orientation_euler[2]) > 1.2:
                 terminated = True
-                reward = -1.0  # Reduced penalty
+                reward = -1.0
             
-            if abs(orientation_euler[0]) > 1.0 or abs(orientation_euler[2]) > 1.0:  # More strict angles
+            # Terminate if worm falls off
+            if worm_pos[1] > 0.3 or worm_pos[1] < -0.3:  # Fell off sides
                 terminated = True
                 reward = -1.0
             
             if self.steps_since_reset >= self.max_steps:
                 terminated = True
             
-            # Debug info
-            if self.render_mode and self.steps_since_reset % 100 == 0:
-                print(f"\nStep {self.steps_since_reset}/{self.max_steps}")
-                print(f"Worm position: {[f'{p:.2f}' for p in worm_pos]}")
-                print(f"Distance to food: {current_distance:.2f}")
-                print(f"Forward progress: {forward_progress:.3f}")
-                print(f"Undulation reward: {undulation_reward:.2f}")
-                print(f"Total reward: {reward:.2f}")
+            self.steps_since_reset += 1
             
             return self._get_observation(), reward, terminated, False, {}
             
@@ -464,7 +516,12 @@ class WormEnv(gym.Env):
                 joint_state = p.getJointState(self.worm_id, joint)
                 obs.extend([joint_state[0], joint_state[1]])
             
+            # Add food position
             obs.extend(self.food_pos)
+            
+            # Add closest stair information
+            closest_stair_pos = self._get_closest_stair_info()
+            obs.extend(closest_stair_pos)
             
             return np.array(obs, dtype=np.float32)
         except Exception as e:
