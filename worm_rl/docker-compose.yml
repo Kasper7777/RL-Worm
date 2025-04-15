@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  worm-rl:
+    build: .
+    volumes:
+      - ./:/app
+      - ./trained_models:/app/trained_models
+    environment:
+      - DISPLAY=${DISPLAY}
+      - NVIDIA_VISIBLE_DEVICES=all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    # Interactive mode for debugging
+    stdin_open: true
+    tty: true 
