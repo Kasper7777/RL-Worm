@@ -48,15 +48,20 @@ class WormEnv(gym.Env):
         self.max_steps = 2000  # Increased episode length
         
         # Food spawn parameters
-        self.food_spawn_radius = 1.0
-        self.food_spawn_min_dist = 0.3
+        self.food_spawn_radius = 2.0  # Increased radius
+        self.food_spawn_min_dist = 0.5  # Increased minimum distance
         self.food_size = 0.05
-        self.max_spawn_attempts = 10
+        self.max_spawn_attempts = 20  # Increased attempts
         
         # Physics parameters
-        self.torque_scale = 0.5  # Reduced torque for more stable movement
-        self.sim_steps_per_action = 10  # Reduced for more frequent control
-        self.max_joint_velocity = 5.0  # Maximum joint velocity
+        self.torque_scale = 2.0  # Increased torque for better control
+        self.sim_steps_per_action = 5  # Reduced for more responsive control
+        self.max_joint_velocity = 3.0  # Reduced maximum velocity
+        
+        # Joint control parameters
+        self.joint_damping = 0.5  # Added damping
+        self.position_gain = 0.3  # For position control
+        self.velocity_gain = 0.1  # For velocity damping
 
     def _connect_physics(self):
         """Safely connect to PyBullet physics server"""
@@ -193,10 +198,10 @@ class WormEnv(gym.Env):
             p.resetSimulation()
             p.setGravity(0, 0, -9.81)
             
-            # Load ground plane
+            # Load ground plane with higher friction
             self.plane_id = p.loadURDF("plane.urdf")
             p.changeDynamics(self.plane_id, -1, 
-                           lateralFriction=0.8,
+                           lateralFriction=1.0,
                            spinningFriction=0.1,
                            rollingFriction=0.1)
             
@@ -206,24 +211,27 @@ class WormEnv(gym.Env):
             # Set dynamics properties for all worm links
             for i in range(p.getNumJoints(self.worm_id) + 1):
                 p.changeDynamics(self.worm_id, i-1,
-                               lateralFriction=0.8,
+                               lateralFriction=1.0,
                                spinningFriction=0.1,
                                rollingFriction=0.1,
                                linearDamping=0.1,
-                               angularDamping=0.1)
+                               angularDamping=0.1,
+                               jointDamping=self.joint_damping)
             
-            # Initialize joints with a sine wave pattern
+            # Initialize joints with a gentler sine wave pattern
             for joint in range(self.num_joints):
-                # Create initial sine wave pattern
                 phase = (joint / self.num_joints) * 2 * np.pi
-                initial_pos = 0.2 * np.sin(phase)
-                p.resetJointState(self.worm_id, joint, initial_pos)
+                initial_pos = 0.1 * np.sin(phase)  # Reduced amplitude
+                p.resetJointState(self.worm_id, joint, initial_pos, targetVelocity=0)
                 p.setJointMotorControl2(
                     self.worm_id,
                     joint,
-                    p.VELOCITY_CONTROL,
+                    p.POSITION_CONTROL,  # Changed to position control
+                    targetPosition=initial_pos,
                     targetVelocity=0,
-                    force=0
+                    positionGain=self.position_gain,
+                    velocityGain=self.velocity_gain,
+                    force=self.torque_scale
                 )
             
             # Reset counters and state
@@ -281,34 +289,35 @@ class WormEnv(gym.Env):
             
             # Apply torques and step simulation
             for _ in range(self.sim_steps_per_action):
-                # Apply torques to joints
+                # Apply torques to joints with velocity clamping
                 for joint in range(self.num_joints):
-                    # Get current joint state
                     joint_state = p.getJointState(self.worm_id, joint)
                     current_velocity = joint_state[1]
                     
-                    # Apply velocity clamping
+                    # Clamp velocity more strictly
                     if abs(current_velocity) > self.max_joint_velocity:
-                        # Apply damping torque to reduce velocity
-                        damping_torque = -np.sign(current_velocity) * self.torque_scale
+                        target_velocity = np.sign(current_velocity) * self.max_joint_velocity
                         p.setJointMotorControl2(
                             bodyIndex=self.worm_id,
                             jointIndex=joint,
-                            controlMode=p.TORQUE_CONTROL,
-                            force=damping_torque
+                            controlMode=p.VELOCITY_CONTROL,
+                            targetVelocity=target_velocity,
+                            force=self.torque_scale
                         )
                     else:
-                        # Apply normal control torque
+                        # Use position control for more stable movement
+                        current_pos = joint_state[0]
+                        target_pos = current_pos + scaled_action[joint] * 0.1  # Small position change
                         p.setJointMotorControl2(
                             bodyIndex=self.worm_id,
                             jointIndex=joint,
-                            controlMode=p.TORQUE_CONTROL,
-                            force=scaled_action[joint]
+                            controlMode=p.POSITION_CONTROL,
+                            targetPosition=target_pos,
+                            targetVelocity=0,
+                            positionGain=self.position_gain,
+                            velocityGain=self.velocity_gain,
+                            force=self.torque_scale
                         )
-                    
-                    # Print joint info for debugging when rendering
-                    if self.render_mode and self.steps_since_reset % 100 == 0:
-                        print(f"Joint {joint}: pos={joint_state[0]:.2f}, vel={joint_state[1]:.2f}")
                 
                 p.stepSimulation()
                 if self.render_mode:

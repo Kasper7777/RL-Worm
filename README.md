@@ -14,9 +14,9 @@ This project implements a 6-segment worm robot in PyBullet that learns to move e
 
 - 6-segment articulated worm with 5 joints
 - Physics-based simulation using PyBullet
-- PPO (Proximal Policy Optimization) implementation using Stable Baselines3
-- Customizable reward system encouraging natural movement
-- Real-time visualization of training progress
+- PPO (Proximal Policy Optimisation) implementation using Stable Baselines3
+- Customisable reward system encouraging natural movement
+- Real-time visualisation of training progress
 - Tensorboard integration for monitoring training metrics
 
 ## Requirements
@@ -62,7 +62,7 @@ RL-Worm/
 │   └── train.py             # Training script
 ├── trained_models/          # Saved models and training logs
 ├── README.md
-├── LICENSE                  # MIT License
+├── LICENSE                  # MIT Licence
 └── requirements.txt         # Project dependencies
 ```
 
@@ -83,7 +83,7 @@ tensorboard --logdir ./trained_models/tensorboard_logs
 ### Worm Robot
 - 6 segments connected by 5 revolute joints
 - Each joint rotates around the Y-axis for side-to-side motion
-- Gradient coloring for easy segment identification
+- Gradient colouring for easy segment identification
 - Realistic physics parameters for stable movement
 
 ### Observation Space
@@ -115,7 +115,7 @@ The PPO agent uses the following key parameters:
 - GAE Lambda: 0.95
 - Clip range: 0.2
 
-## Customization
+## Customisation
 
 You can modify various parameters in the environment:
 - `max_steps`: Episode length (default: 2000)
@@ -128,9 +128,9 @@ You can modify various parameters in the environment:
 
 Contributions are welcome! Please feel free to submit pull requests or open issues for improvements.
 
-## License
+## Licence
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is licensed under the MIT Licence - see the LICENCE file for details.
 Copyright (c) 2025 Kestrel Kinetics Research & Technology
 
 ## Acknowledgments
