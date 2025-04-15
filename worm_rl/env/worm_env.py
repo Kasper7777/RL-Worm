@@ -359,20 +359,25 @@ class WormEnv(gym.Env):
         for e in events:
             # Only handle mouse button down events
             if e[0] == 2:  # 2 = Mouse button event
-                # e[3] = 1 (down), 0 (up)
                 if e[3] == 1:
-                    # Get mouse position in 3D
                     mouse_x, mouse_y = e[1], e[2]
-                    # Use ray test to get 3D world position
                     width, height, view_mat, proj_mat, _, _ = p.getDebugVisualizerCamera()
                     ray_start, ray_end = self._compute_ray(mouse_x, mouse_y, width, height, view_mat, proj_mat)
                     hits = p.rayTest(ray_start, ray_end)
                     if hits and hits[0][0] != -1:
+                        hit_obj = hits[0][0]
                         hit_pos = hits[0][3]
-                        if e[4] == 0:  # Left button
-                            self._place_food_at(hit_pos)
-                        elif e[4] == 1:  # Right button
-                            self._place_stair_at(hit_pos)
+                        # Only allow placement on ground plane (self.plane_id)
+                        if hit_obj == self.plane_id:
+                            # Ignore clicks too close to the worm
+                            worm_pos, _ = p.getBasePositionAndOrientation(self.worm_id)
+                            dist = np.linalg.norm(np.array(hit_pos[:2]) - np.array(worm_pos[:2]))
+                            if dist < 0.2:
+                                continue  # Too close to worm
+                            if e[4] == 0:  # Left button
+                                self._place_food_at(hit_pos)
+                            elif e[4] == 1:  # Right button
+                                self._place_stair_at(hit_pos)
 
     def _compute_ray(self, mouse_x, mouse_y, width, height, view_mat, proj_mat):
         """Compute a ray from the camera through the mouse position."""
@@ -393,14 +398,14 @@ class WormEnv(gym.Env):
         return near_world[:3], far_world[:3]
 
     def _place_food_at(self, pos):
-        """Place food at the given 3D position."""
-        # Remove old food
+        """Place food at the given 3D position (on ground)."""
         if self.food_visual_id is not None:
             try:
                 p.removeBody(self.food_visual_id)
             except:
                 pass
             self.food_visual_id = None
+        # Always place food on ground
         self.food_pos = [pos[0], pos[1], self.food_size]
         visual_shape = p.createVisualShape(
             shapeType=p.GEOM_SPHERE,
@@ -419,7 +424,7 @@ class WormEnv(gym.Env):
         )
 
     def _place_stair_at(self, pos):
-        """Place a stair at the given 3D position."""
+        """Place a stair at the given 3D position (on ground)."""
         stair_height = self.stair_height
         stair_width = self.stair_width
         stair_depth = self.stair_depth
@@ -463,15 +468,12 @@ class WormEnv(gym.Env):
         try:
             # Apply actions and step simulation
             for _ in range(self.sim_steps_per_action):
-                # Apply velocity control to joints with stronger smoothing
                 for joint in range(self.num_joints):
                     current_vel = p.getJointState(self.worm_id, joint)[1]
                     target_vel = action[joint] * self.max_joint_velocity
                     desired_vel = current_vel + np.clip(target_vel - current_vel, -0.05, 0.05)
-                    
                     current_pos = p.getJointState(self.worm_id, joint)[0]
                     target_pos = current_pos + desired_vel * (1/120.)
-                    
                     p.setJointMotorControl2(
                         bodyIndex=self.worm_id,
                         jointIndex=joint,
@@ -483,7 +485,6 @@ class WormEnv(gym.Env):
                         force=self.max_force,
                         maxVelocity=self.max_joint_velocity
                     )
-                
                 p.stepSimulation()
                 if self.render_mode:
                     time.sleep(self.render_delay)
@@ -495,60 +496,48 @@ class WormEnv(gym.Env):
             # Calculate rewards
             height_change = worm_pos[2] - self.previous_height
             self.previous_height = worm_pos[2]
-            
-            # Forward progress
             forward_progress = worm_pos[0] - self.previous_x
             self.previous_x = worm_pos[0]
-            
-            # Climbing reward
-            climbing_reward = height_change * 50.0
-            forward_reward = forward_progress * 30.0
-            
-            # Contact points reward
             contact_points = p.getContactPoints(self.worm_id)
             contact_reward = len(contact_points) * 0.1
             
-            # Stability reward - more lenient now
-            stability_penalty = -0.2 * (abs(orientation_euler[0]) + abs(orientation_euler[2]))
+            # Encourage forward progress much more
+            forward_reward = forward_progress * 100.0  # Stronger incentive
+            climbing_reward = height_change * 30.0     # Still reward climbing, but less
+            
+            # Reduce penalties for instability
+            stability_penalty = -0.05 * (abs(orientation_euler[0]) + abs(orientation_euler[2]))
+            
+            # Remove velocity penalty entirely
+            # Add a small base reward for any movement
+            movement_reward = 0.05 if abs(forward_progress) > 1e-4 else 0.0
             
             # Combine rewards
             reward = (
-                climbing_reward * 0.4 +
-                forward_reward * 0.3 +
-                stability_penalty * 0.2 +
-                contact_reward * 0.1
+                forward_reward * 0.5 +    # Strongly encourage forward movement
+                climbing_reward * 0.2 +   # Still reward climbing
+                stability_penalty * 0.1 + # Small penalty for instability
+                contact_reward * 0.1 +    # Encourage contact
+                movement_reward * 0.1     # Small reward for any movement
             )
             
-            # Early termination conditions - more lenient now
+            # Early termination conditions
             terminated = False
-            
-            # Only terminate if the worm is severely off course
-            if abs(worm_pos[1]) > 0.5:  # Increased side threshold
+            if abs(worm_pos[1]) > 0.5:
                 terminated = True
                 reward = -1.0
-            
-            # More lenient flip detection
-            if abs(orientation_euler[0]) > 1.5 or abs(orientation_euler[2]) > 1.5:  # Increased angle threshold
+            if abs(orientation_euler[0]) > 1.5 or abs(orientation_euler[2]) > 1.5:
                 terminated = True
                 reward = -1.0
-            
-            # Add debug visualization
             if self.render_mode and self.steps_since_reset % 100 == 0:
                 print(f"\nStep {self.steps_since_reset}")
                 print(f"Position: {[f'{p:.2f}' for p in worm_pos]}")
-                print(f"Height change: {height_change:.3f}")
                 print(f"Forward progress: {forward_progress:.3f}")
-                print(f"Contacts: {len(contact_points)}")
                 print(f"Reward: {reward:.3f}")
-            
             self.steps_since_reset += 1
-            
-            # Only terminate on max steps
             if self.steps_since_reset >= self.max_steps:
                 terminated = True
-            
             return self._get_observation(), reward, terminated, False, {}
-            
         except Exception as e:
             print(f"Error in step: {e}")
             self.connected = False
