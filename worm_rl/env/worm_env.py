@@ -13,6 +13,19 @@ class WormEnv(gym.Env):
         self.render_mode = render
         self.connected = False
         self.physics_client = None
+        
+        # Initialize variables
+        self.previous_x = 0
+        self.previous_height = 0
+        self.steps_since_reset = 0
+        self.plane_id = None
+        self.worm_id = None
+        self.food_pos = [2.0, 0.0, 0.025]  # Initialize food position
+        self.food_visual_id = None
+        self.stairs = []
+        self.max_steps = 2000
+        
+        # Connect to physics engine
         self._connect_physics()
         
         # Get the path to the URDF file
@@ -30,7 +43,7 @@ class WormEnv(gym.Env):
             dtype=np.float32
         )
         
-        # Define observation space (now includes stair information)
+        # Define observation space
         obs_dim = (2 * self.num_joints  # joint positions and velocities
                   + 7  # base position (3) and orientation (4)
                   + 3  # food position
@@ -48,40 +61,15 @@ class WormEnv(gym.Env):
         self.stair_height = 0.05
         self.stair_width = 0.2
         self.stair_depth = 0.2
-        self.stairs = []  # Store stair IDs
         
-        self.previous_x = 0
-        self.previous_height = 0
-        self.steps_since_reset = 0
-        self.plane_id = None
-        self.worm_id = None
-        self.food_pos = None
-        self.food_visual_id = None
-        self.prev_distance_to_food = None
-        self.max_steps = 2000
-        
-        # Updated parameters for more realistic movement
-        self.food_spawn_radius = 0.5
-        self.food_spawn_min_dist = 0.2
-        self.food_size = 0.05
-        self.max_spawn_attempts = 50
-        
-        # Physics parameters for more realistic movement
-        self.max_joint_velocity = 0.5  # Even slower maximum velocity
-        self.sim_steps_per_action = 4  # More simulation steps for stability
-        
-        # Updated control parameters for better ground contact
-        self.joint_damping = 0.5  # Higher damping to prevent erratic movement
-        self.position_gain = 0.5  # Increased position control
-        self.velocity_gain = 0.5  # Increased velocity control
-        self.max_force = 1.0  # Lower force to prevent jumping
-        
-        # Phase parameters for undulation
-        self.target_phase_diff = np.pi / 2
-        self.phase_tolerance = np.pi / 4
-        
-        # Visualization delay (seconds)
-        self.render_delay = 0.01  # Increased delay for slower visualization
+        # Physics parameters for climbing
+        self.max_joint_velocity = 1.0
+        self.sim_steps_per_action = 4
+        self.joint_damping = 0.3
+        self.position_gain = 0.5
+        self.velocity_gain = 0.5
+        self.max_force = 2.0
+        self.render_delay = 0.01
 
     def _connect_physics(self):
         """Safely connect to PyBullet physics server"""
@@ -281,115 +269,72 @@ class WormEnv(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         
-        # Clean up any existing objects
-        if self.food_visual_id is not None:
-            try:
-                p.removeBody(self.food_visual_id)
-            except:
-                pass
-            self.food_visual_id = None
-        
-        # Clean up stairs
-        for stair_id in self.stairs:
-            try:
-                p.removeBody(stair_id)
-            except:
-                pass
-        self.stairs = []
-        
-        # Ensure connection
+        # Always ensure connection
         if not self.connected:
             self._connect_physics()
         
-        try:
-            p.resetSimulation()
-            p.setGravity(0, 0, -9.81)
-            
-            # Load ground plane with high friction
-            self.plane_id = p.loadURDF("plane.urdf")
-            p.changeDynamics(
-                self.plane_id,
-                -1,
-                lateralFriction=2.0,
-                spinningFriction=0.5,
-                rollingFriction=0.5
-            )
-            
-            # Create stairs
-            self._create_stairs()
-            
-            # Load worm at the start of stairs
-            self.worm_id = p.loadURDF(self.urdf_path, [0, 0, 0.05])
-            
-            # Set dynamics properties for all worm links
-            for i in range(p.getNumJoints(self.worm_id) + 1):
-                p.changeDynamics(self.worm_id, i-1,
-                               lateralFriction=1.5,  # Increased friction
-                               spinningFriction=0.3,
-                               rollingFriction=0.3,
-                               linearDamping=0.3,  # Increased damping
-                               angularDamping=0.3,
-                               jointDamping=self.joint_damping,
-                               contactStiffness=10000,  # Added contact stiffness
-                               contactDamping=100)     # Added contact damping
-            
-            # Initialize joints with a gentler sine wave pattern
-            for joint in range(self.num_joints):
-                phase = (joint / self.num_joints) * 2 * np.pi
-                initial_pos = 0.1 * np.sin(phase)  # Reduced amplitude
-                p.resetJointState(self.worm_id, joint, initial_pos, targetVelocity=0)
-                p.setJointMotorControl2(
-                    self.worm_id,
-                    joint,
-                    p.POSITION_CONTROL,  # Changed to position control
-                    targetPosition=initial_pos,
-                    targetVelocity=0,
-                    positionGain=self.position_gain,
-                    velocityGain=self.velocity_gain,
-                    force=self.max_force
+        # Full reset if needed
+        if self.steps_since_reset >= self.max_steps or self.worm_id is None:
+            try:
+                p.resetSimulation()
+                p.setGravity(0, 0, -9.81)
+                
+                # Load ground plane
+                self.plane_id = p.loadURDF("plane.urdf")
+                p.changeDynamics(
+                    self.plane_id,
+                    -1,
+                    lateralFriction=2.0,
+                    spinningFriction=0.5,
+                    rollingFriction=0.5
                 )
-            
-            # Reset counters and state
-            self.previous_x = 0
-            self.previous_height = 0
-            self.steps_since_reset = 0
-            
-            # Try to spawn food and initialize distance
-            if not self._spawn_food():
-                # If food spawning fails, use a default position
-                self.food_pos = [1.0, 0.0, 0.025]
-                # Create visual marker for default food position
-                visual_shape = p.createVisualShape(
-                    shapeType=p.GEOM_SPHERE,
-                    radius=self.food_size,
-                    rgbaColor=[1, 0, 0, 1]
-                )
-                collision_shape = p.createCollisionShape(
-                    shapeType=p.GEOM_SPHERE,
-                    radius=self.food_size
-                )
-                self.food_visual_id = p.createMultiBody(
-                    baseMass=0,
-                    baseCollisionShapeIndex=collision_shape,
-                    baseVisualShapeIndex=visual_shape,
-                    basePosition=self.food_pos
-                )
-            
-            worm_pos, _ = p.getBasePositionAndOrientation(self.worm_id)
-            self.prev_distance_to_food = np.linalg.norm(np.array(self.food_pos) - np.array(worm_pos))
-            
-            # Let the worm settle
-            for _ in range(100):
-                p.stepSimulation()
-                if self.render_mode:
-                    time.sleep(0.001)
-            
-            return self._get_observation(), {}
-            
-        except Exception as e:
-            print(f"Error in reset: {e}")
-            self.connected = False
-            return np.zeros(self.observation_space.shape, dtype=np.float32), {}
+                
+                # Create stairs
+                self._create_stairs()
+                
+                # Load worm
+                self.worm_id = p.loadURDF(self.urdf_path, [0, 0, 0.05])
+                
+                # Set dynamics properties
+                for i in range(p.getNumJoints(self.worm_id) + 1):
+                    p.changeDynamics(
+                        self.worm_id,
+                        i-1,
+                        lateralFriction=1.5,
+                        spinningFriction=0.3,
+                        rollingFriction=0.3,
+                        linearDamping=0.3,
+                        angularDamping=0.3,
+                        jointDamping=self.joint_damping,
+                        contactStiffness=10000,
+                        contactDamping=100
+                    )
+            except Exception as e:
+                print(f"Error in full reset: {e}")
+                self.connected = False
+                return np.zeros(self.observation_space.shape, dtype=np.float32), {}
+        else:
+            # Just reset worm position
+            try:
+                p.resetBasePositionAndOrientation(self.worm_id, [0, 0, 0.05], [0, 0, 0, 1])
+                for joint in range(self.num_joints):
+                    p.resetJointState(self.worm_id, joint, 0, 0)
+            except Exception as e:
+                print(f"Error in position reset: {e}")
+                return self.reset(seed=seed)  # Try full reset if position reset fails
+        
+        # Reset state variables
+        self.previous_x = 0
+        self.previous_height = 0
+        self.steps_since_reset = 0
+        
+        # Let the worm settle
+        for _ in range(100):
+            p.stepSimulation()
+            if self.render_mode:
+                time.sleep(0.001)
+        
+        return self._get_observation(), {}
 
     def _get_closest_stair_info(self):
         """Get information about the closest stair relative to the worm."""
@@ -406,7 +351,108 @@ class WormEnv(gym.Env):
         
         return closest_stair_pos
 
+    def _handle_mouse_events(self):
+        """Handle mouse clicks to place food or stairs in GUI mode."""
+        if not self.render_mode:
+            return
+        events = p.getMouseEvents()
+        for e in events:
+            # Only handle mouse button down events
+            if e[0] == 2:  # 2 = Mouse button event
+                # e[3] = 1 (down), 0 (up)
+                if e[3] == 1:
+                    # Get mouse position in 3D
+                    mouse_x, mouse_y = e[1], e[2]
+                    # Use ray test to get 3D world position
+                    width, height, view_mat, proj_mat, _, _ = p.getDebugVisualizerCamera()
+                    ray_start, ray_end = self._compute_ray(mouse_x, mouse_y, width, height, view_mat, proj_mat)
+                    hits = p.rayTest(ray_start, ray_end)
+                    if hits and hits[0][0] != -1:
+                        hit_pos = hits[0][3]
+                        if e[4] == 0:  # Left button
+                            self._place_food_at(hit_pos)
+                        elif e[4] == 1:  # Right button
+                            self._place_stair_at(hit_pos)
+
+    def _compute_ray(self, mouse_x, mouse_y, width, height, view_mat, proj_mat):
+        """Compute a ray from the camera through the mouse position."""
+        # Convert mouse_x, mouse_y (pixels) to normalized device coordinates
+        ndc_x = (2.0 * mouse_x) / width - 1.0
+        ndc_y = 1.0 - (2.0 * mouse_y) / height
+        # Near and far points in NDC
+        ndc_near = [ndc_x, ndc_y, -1, 1]
+        ndc_far = [ndc_x, ndc_y, 1, 1]
+        # Inverse projection and view
+        inv_proj = np.linalg.inv(np.array(proj_mat).reshape(4, 4))
+        inv_view = np.linalg.inv(np.array(view_mat).reshape(4, 4))
+        # Unproject
+        near_world = inv_view @ (inv_proj @ np.array(ndc_near))
+        far_world = inv_view @ (inv_proj @ np.array(ndc_far))
+        near_world /= near_world[3]
+        far_world /= far_world[3]
+        return near_world[:3], far_world[:3]
+
+    def _place_food_at(self, pos):
+        """Place food at the given 3D position."""
+        # Remove old food
+        if self.food_visual_id is not None:
+            try:
+                p.removeBody(self.food_visual_id)
+            except:
+                pass
+            self.food_visual_id = None
+        self.food_pos = [pos[0], pos[1], self.food_size]
+        visual_shape = p.createVisualShape(
+            shapeType=p.GEOM_SPHERE,
+            radius=self.food_size,
+            rgbaColor=[1, 0, 0, 1]
+        )
+        collision_shape = p.createCollisionShape(
+            shapeType=p.GEOM_SPHERE,
+            radius=self.food_size
+        )
+        self.food_visual_id = p.createMultiBody(
+            baseMass=0,
+            baseCollisionShapeIndex=collision_shape,
+            baseVisualShapeIndex=visual_shape,
+            basePosition=self.food_pos
+        )
+
+    def _place_stair_at(self, pos):
+        """Place a stair at the given 3D position."""
+        stair_height = self.stair_height
+        stair_width = self.stair_width
+        stair_depth = self.stair_depth
+        col_id = p.createCollisionShape(
+            shapeType=p.GEOM_BOX,
+            halfExtents=[stair_depth/2, stair_width/2, stair_height/2]
+        )
+        vis_id = p.createVisualShape(
+            shapeType=p.GEOM_BOX,
+            halfExtents=[stair_depth/2, stair_width/2, stair_height/2],
+            rgbaColor=[0.8, 0.8, 0.8, 1]
+        )
+        stair_id = p.createMultiBody(
+            baseMass=0,
+            baseCollisionShapeIndex=col_id,
+            baseVisualShapeIndex=vis_id,
+            basePosition=[pos[0], pos[1], stair_height/2]
+        )
+        p.changeDynamics(
+            stair_id,
+            -1,
+            lateralFriction=2.0,
+            spinningFriction=0.5,
+            rollingFriction=0.5,
+            contactStiffness=10000,
+            contactDamping=100
+        )
+        self.stairs.append(stair_id)
+
     def step(self, action):
+        if self.render_mode:
+            self._handle_mouse_events()
+        
         if not self.connected:
             try:
                 self._connect_physics()
@@ -419,20 +465,17 @@ class WormEnv(gym.Env):
             for _ in range(self.sim_steps_per_action):
                 # Apply velocity control to joints with stronger smoothing
                 for joint in range(self.num_joints):
-                    # Scale action to velocity with smoother transitions
                     current_vel = p.getJointState(self.worm_id, joint)[1]
                     target_vel = action[joint] * self.max_joint_velocity
-                    # Even smoother velocity changes
                     desired_vel = current_vel + np.clip(target_vel - current_vel, -0.05, 0.05)
                     
-                    # Use position control with velocity limits
                     current_pos = p.getJointState(self.worm_id, joint)[0]
-                    target_pos = current_pos + desired_vel * (1/120.)  # Based on timestep
+                    target_pos = current_pos + desired_vel * (1/120.)
                     
                     p.setJointMotorControl2(
                         bodyIndex=self.worm_id,
                         jointIndex=joint,
-                        controlMode=p.POSITION_CONTROL,  # Changed to position control
+                        controlMode=p.POSITION_CONTROL,
                         targetPosition=target_pos,
                         targetVelocity=desired_vel,
                         positionGain=self.position_gain,
@@ -443,10 +486,11 @@ class WormEnv(gym.Env):
                 
                 p.stepSimulation()
                 if self.render_mode:
-                    time.sleep(self.render_delay)  # Consistent delay for visualization
+                    time.sleep(self.render_delay)
             
             # Get current state
             worm_pos, orientation = p.getBasePositionAndOrientation(self.worm_id)
+            orientation_euler = p.getEulerFromQuaternion(orientation)
             
             # Calculate rewards
             height_change = worm_pos[2] - self.previous_height
@@ -457,42 +501,51 @@ class WormEnv(gym.Env):
             self.previous_x = worm_pos[0]
             
             # Climbing reward
-            climbing_reward = height_change * 50.0  # Strong incentive for gaining height
-            forward_reward = forward_progress * 30.0  # Reduced emphasis on forward movement
-            
-            # Stability reward
-            orientation_euler = p.getEulerFromQuaternion(orientation)
-            stability_penalty = -0.5 * (abs(orientation_euler[0]) + abs(orientation_euler[2]))
+            climbing_reward = height_change * 50.0
+            forward_reward = forward_progress * 30.0
             
             # Contact points reward
             contact_points = p.getContactPoints(self.worm_id)
-            contact_reward = len(contact_points) * 0.1  # Reward for maintaining contact
+            contact_reward = len(contact_points) * 0.1
+            
+            # Stability reward - more lenient now
+            stability_penalty = -0.2 * (abs(orientation_euler[0]) + abs(orientation_euler[2]))
             
             # Combine rewards
             reward = (
-                climbing_reward * 0.4 +    # Emphasis on climbing
-                forward_reward * 0.3 +     # Forward progress
-                stability_penalty * 0.2 +  # Stability
-                contact_reward * 0.1       # Contact maintenance
+                climbing_reward * 0.4 +
+                forward_reward * 0.3 +
+                stability_penalty * 0.2 +
+                contact_reward * 0.1
             )
             
-            # Early termination conditions
+            # Early termination conditions - more lenient now
             terminated = False
             
-            # Terminate if worm flips over
-            if abs(orientation_euler[0]) > 1.2 or abs(orientation_euler[2]) > 1.2:
+            # Only terminate if the worm is severely off course
+            if abs(worm_pos[1]) > 0.5:  # Increased side threshold
                 terminated = True
                 reward = -1.0
             
-            # Terminate if worm falls off
-            if worm_pos[1] > 0.3 or worm_pos[1] < -0.3:  # Fell off sides
+            # More lenient flip detection
+            if abs(orientation_euler[0]) > 1.5 or abs(orientation_euler[2]) > 1.5:  # Increased angle threshold
                 terminated = True
                 reward = -1.0
             
-            if self.steps_since_reset >= self.max_steps:
-                terminated = True
+            # Add debug visualization
+            if self.render_mode and self.steps_since_reset % 100 == 0:
+                print(f"\nStep {self.steps_since_reset}")
+                print(f"Position: {[f'{p:.2f}' for p in worm_pos]}")
+                print(f"Height change: {height_change:.3f}")
+                print(f"Forward progress: {forward_progress:.3f}")
+                print(f"Contacts: {len(contact_points)}")
+                print(f"Reward: {reward:.3f}")
             
             self.steps_since_reset += 1
+            
+            # Only terminate on max steps
+            if self.steps_since_reset >= self.max_steps:
+                terminated = True
             
             return self._get_observation(), reward, terminated, False, {}
             
@@ -508,15 +561,19 @@ class WormEnv(gym.Env):
         try:
             obs = []
             
+            # Get worm state
             pos, orn = p.getBasePositionAndOrientation(self.worm_id)
             obs.extend(list(pos))
             obs.extend(list(orn))
             
+            # Get joint states
             for joint in range(self.num_joints):
                 joint_state = p.getJointState(self.worm_id, joint)
                 obs.extend([joint_state[0], joint_state[1]])
             
-            # Add food position
+            # Add food position (ensure it exists)
+            if self.food_pos is None:
+                self.food_pos = [2.0, 0.0, 0.025]
             obs.extend(self.food_pos)
             
             # Add closest stair information
