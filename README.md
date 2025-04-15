@@ -1,6 +1,6 @@
 # Worm Reinforcement Learning Project
 
-A PyBullet-based reinforcement learning project where a segmented worm learns to navigate and collect food using natural undulating movements.
+A PyBullet-based reinforcement learning project where a segmented worm learns to navigate and collect food using natural undulating movements. This project demonstrates advanced robotics control using deep reinforcement learning.
 
 ## Overview
 
@@ -32,11 +32,11 @@ This project implements a 6-segment worm robot in PyBullet that learns to move e
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/worm_rl.git
-cd worm_rl
+git clone https://github.com/Kasper7777/RL-Worm.git
+cd RL-Worm
 ```
 
-2. Create and activate a virtual environment (optional but recommended):
+2. Create and activate a virtual environment:
 ```bash
 python -m venv venv
 # On Windows:
@@ -47,13 +47,13 @@ source venv/bin/activate
 
 3. Install dependencies:
 ```bash
-pip install stable-baselines3 pybullet gymnasium numpy tensorboard
+pip install -r requirements.txt
 ```
 
 ## Project Structure
 
 ```
-worm_rl/
+RL-Worm/
 ├── worm_rl/
 │   ├── env/
 │   │   └── worm_env.py      # Main environment implementation
@@ -62,7 +62,8 @@ worm_rl/
 │   └── train.py             # Training script
 ├── trained_models/          # Saved models and training logs
 ├── README.md
-└── requirements.txt
+├── LICENSE                  # MIT License
+└── requirements.txt         # Project dependencies
 ```
 
 ## Usage
@@ -95,12 +96,12 @@ tensorboard --logdir ./trained_models/tensorboard_logs
 - Range: [-1.0, 1.0] for each joint
 
 ### Rewards
-- Distance to food reward
-- Forward progress reward
-- Undulation coordination reward
-- Height maintenance reward
-- Velocity control penalty
-- Food collection bonus
+- Distance to food reward (weighted by 10.0)
+- Forward progress reward (weighted by 5.0)
+- Undulation coordination reward (0.1 per coordinated joint pair)
+- Height maintenance reward (0.1 for optimal height)
+- Velocity control penalty (-0.001 * velocity²)
+- Food collection bonus (10.0)
 
 ## Training Parameters
 
@@ -110,13 +111,16 @@ The PPO agent uses the following key parameters:
 - Training steps: 2M
 - Episode length: 2000 steps
 - Network architecture: [256, 256] for both policy and value networks
+- Gamma (discount factor): 0.99
+- GAE Lambda: 0.95
+- Clip range: 0.2
 
 ## Customization
 
 You can modify various parameters in the environment:
-- `max_steps`: Episode length
-- `torque_scale`: Maximum torque applied to joints
-- `max_joint_velocity`: Velocity limits for stability
+- `max_steps`: Episode length (default: 2000)
+- `torque_scale`: Maximum torque applied to joints (default: 0.5)
+- `max_joint_velocity`: Velocity limits for stability (default: 5.0)
 - Reward weights and thresholds
 - Physics parameters (friction, damping, etc.)
 
@@ -127,9 +131,23 @@ Contributions are welcome! Please feel free to submit pull requests or open issu
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
+Copyright (c) 2025 Kestrel Kinetics Research & Technology
 
 ## Acknowledgments
 
 - PyBullet for the physics simulation
 - Stable Baselines3 for the RL implementation
-- The RL community for inspiration and best practices 
+- The RL community for inspiration and best practices
+
+## Citation
+
+If you use this code in your research, please cite:
+```bibtex
+@misc{kestrel2025worm,
+    title={Worm Reinforcement Learning Project},
+    author={Kestrel Kinetics Research & Technology},
+    year={2025},
+    publisher={GitHub},
+    howpublished={\url{https://github.com/KestrelKinetics/worm_rl}}
+}
+``` 
