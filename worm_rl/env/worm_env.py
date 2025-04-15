@@ -22,7 +22,7 @@ class WormEnv(gym.Env):
         # Updated for 5 joints
         self.num_joints = 5
         
-        # Define action space (joint torques)
+        # Define action space (joint velocities)
         self.action_space = spaces.Box(
             low=-1.0, 
             high=1.0, 
@@ -30,7 +30,7 @@ class WormEnv(gym.Env):
             dtype=np.float32
         )
         
-        # Define observation space (increased for more joints)
+        # Define observation space
         self.observation_space = spaces.Box(
             low=-np.inf,
             high=np.inf,
@@ -45,23 +45,30 @@ class WormEnv(gym.Env):
         self.food_pos = None
         self.food_visual_id = None
         self.prev_distance_to_food = None
-        self.max_steps = 2000  # Increased episode length
+        self.max_steps = 2000
         
-        # Food spawn parameters
-        self.food_spawn_radius = 2.0  # Increased radius
-        self.food_spawn_min_dist = 0.5  # Increased minimum distance
+        # Updated parameters
+        self.food_spawn_radius = 0.5  # Reduced radius for easier targets
+        self.food_spawn_min_dist = 0.2  # Reduced minimum distance
         self.food_size = 0.05
-        self.max_spawn_attempts = 20  # Increased attempts
+        self.max_spawn_attempts = 50
         
-        # Physics parameters
-        self.torque_scale = 2.0  # Increased torque for better control
-        self.sim_steps_per_action = 5  # Reduced for more responsive control
-        self.max_joint_velocity = 3.0  # Reduced maximum velocity
+        # Slower physics parameters
+        self.max_joint_velocity = 1.0  # Reduced maximum velocity
+        self.sim_steps_per_action = 2  # Fewer steps for smoother visualization
         
-        # Joint control parameters
-        self.joint_damping = 0.5  # Added damping
-        self.position_gain = 0.3  # For position control
-        self.velocity_gain = 0.1  # For velocity damping
+        # Updated control parameters
+        self.joint_damping = 0.2  # Increased damping for slower movement
+        self.position_gain = 0.3
+        self.velocity_gain = 0.3
+        self.max_force = 3.0  # Reduced force for gentler movement
+        
+        # Phase parameters for undulation
+        self.target_phase_diff = np.pi / 2
+        self.phase_tolerance = np.pi / 4
+        
+        # Visualization delay (seconds)
+        self.render_delay = 0.01  # Increased delay for slower visualization
 
     def _connect_physics(self):
         """Safely connect to PyBullet physics server"""
@@ -99,12 +106,14 @@ class WormEnv(gym.Env):
             
             # Configure GUI and physics
             if self.render_mode:
-                p.configureDebugVisualizer(p.COV_ENABLE_GUI, 1)  # Enable GUI for debugging
+                p.configureDebugVisualizer(p.COV_ENABLE_GUI, 1)
                 p.configureDebugVisualizer(p.COV_ENABLE_KEYBOARD_SHORTCUTS, 1)
                 p.configureDebugVisualizer(p.COV_ENABLE_MOUSE_PICKING, 1)
+                p.configureDebugVisualizer(p.COV_ENABLE_SHADOWS, 1)  # Enable shadows
                 
+                # Adjust camera for better view
                 p.resetDebugVisualizerCamera(
-                    cameraDistance=1.5,
+                    cameraDistance=0.7,  # Closer view
                     cameraYaw=0,
                     cameraPitch=-20,
                     cameraTargetPosition=[0, 0, 0]
@@ -112,8 +121,8 @@ class WormEnv(gym.Env):
                 time.sleep(0.2)
             
             p.setAdditionalSearchPath(pybullet_data.getDataPath())
-            p.setGravity(0, 0, -9.81)  # Standard gravity
-            p.setTimeStep(1./240.)
+            p.setGravity(0, 0, -9.81)
+            p.setTimeStep(1./120.)  # Slower physics timestep
             p.setRealTimeSimulation(0)
             
         except Exception as e:
@@ -128,10 +137,11 @@ class WormEnv(gym.Env):
             if self.food_visual_id is not None:
                 try:
                     p.removeBody(self.food_visual_id)
-                except p.error:
-                    print("Warning: Could not remove previous food object")
-                self.food_visual_id = None
-                time.sleep(0.05)
+                except:
+                    # If removal fails, just ignore and create new food
+                    pass
+                finally:
+                    self.food_visual_id = None
             
             if not self.connected or self.worm_id is None:
                 print("Warning: Cannot spawn food - not connected or no worm")
@@ -141,46 +151,72 @@ class WormEnv(gym.Env):
             
             # Try multiple positions until we find a valid one
             for attempt in range(self.max_spawn_attempts):
-                angle = np.random.uniform(0, 2 * np.pi)
+                # Try spawning in front of the worm with some randomness
+                angle = np.random.uniform(-np.pi/4, np.pi/4)  # Reduced angle range
                 distance = np.random.uniform(self.food_spawn_min_dist, self.food_spawn_radius)
                 
+                # Bias towards spawning in front of the worm
                 food_x = worm_pos[0] + distance * np.cos(angle)
                 food_y = worm_pos[1] + distance * np.sin(angle)
                 food_z = 0.025  # Slightly above ground
                 
-                # Check if position is clear
-                aabb_min = [food_x - self.food_size, food_y - self.food_size, 0]
-                aabb_max = [food_x + self.food_size, food_y + self.food_size, self.food_size * 2]
-                overlapping = p.getOverlappingObjects(aabb_min, aabb_max)
-                
-                if overlapping is None or len(overlapping) == 0:
-                    try:
-                        visual_shape = p.createVisualShape(
-                            shapeType=p.GEOM_SPHERE,
-                            radius=self.food_size,
-                            rgbaColor=[1, 0, 0, 1]
-                        )
-                        
-                        collision_shape = p.createCollisionShape(
-                            shapeType=p.GEOM_SPHERE,
-                            radius=self.food_size
-                        )
-                        
-                        self.food_visual_id = p.createMultiBody(
-                            baseMass=0,
-                            baseCollisionShapeIndex=collision_shape,
-                            baseVisualShapeIndex=visual_shape,
-                            basePosition=[food_x, food_y, food_z]
-                        )
-                        
-                        if self.food_visual_id is not None:
-                            self.food_pos = [food_x, food_y, food_z]
-                            return True
-                    except p.error as e:
-                        print(f"Warning: Failed to create food object: {e}")
-                        continue
+                # Create the food object
+                try:
+                    # First create visual shape
+                    visual_shape = p.createVisualShape(
+                        shapeType=p.GEOM_SPHERE,
+                        radius=self.food_size,
+                        rgbaColor=[1, 0, 0, 1]
+                    )
+                    
+                    # Then create collision shape
+                    collision_shape = p.createCollisionShape(
+                        shapeType=p.GEOM_SPHERE,
+                        radius=self.food_size
+                    )
+                    
+                    # Finally create the body
+                    food_id = p.createMultiBody(
+                        baseMass=0,
+                        baseCollisionShapeIndex=collision_shape,
+                        baseVisualShapeIndex=visual_shape,
+                        basePosition=[food_x, food_y, food_z]
+                    )
+                    
+                    # Only update our references if creation was successful
+                    if food_id is not None:
+                        self.food_visual_id = food_id
+                        self.food_pos = [food_x, food_y, food_z]
+                        return True
+                except:
+                    # If creation fails, clean up and try again
+                    continue
             
-            print("Warning: Could not find valid food position after multiple attempts")
+            # If we failed to spawn food, use a default position
+            try:
+                self.food_pos = [worm_pos[0] + 0.5, worm_pos[1], 0.025]
+                visual_shape = p.createVisualShape(
+                    shapeType=p.GEOM_SPHERE,
+                    radius=self.food_size,
+                    rgbaColor=[1, 0, 0, 1]
+                )
+                collision_shape = p.createCollisionShape(
+                    shapeType=p.GEOM_SPHERE,
+                    radius=self.food_size
+                )
+                food_id = p.createMultiBody(
+                    baseMass=0,
+                    baseCollisionShapeIndex=collision_shape,
+                    baseVisualShapeIndex=visual_shape,
+                    basePosition=self.food_pos
+                )
+                if food_id is not None:
+                    self.food_visual_id = food_id
+                    return True
+            except:
+                # If even default position fails, return False
+                return False
+            
             return False
             
         except Exception as e:
@@ -189,6 +225,14 @@ class WormEnv(gym.Env):
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
+        
+        # Clean up any existing objects
+        if self.food_visual_id is not None:
+            try:
+                p.removeBody(self.food_visual_id)
+            except:
+                pass
+            self.food_visual_id = None
         
         # Ensure connection
         if not self.connected:
@@ -231,7 +275,7 @@ class WormEnv(gym.Env):
                     targetVelocity=0,
                     positionGain=self.position_gain,
                     velocityGain=self.velocity_gain,
-                    force=self.torque_scale
+                    force=self.max_force
                 )
             
             # Reset counters and state
@@ -284,133 +328,118 @@ class WormEnv(gym.Env):
                 return np.zeros(self.observation_space.shape, dtype=np.float32), 0.0, True, False, {}
         
         try:
-            # Scale actions and apply torques
-            scaled_action = action * self.torque_scale
-            
-            # Apply torques and step simulation
+            # Apply actions and step simulation
             for _ in range(self.sim_steps_per_action):
-                # Apply torques to joints with velocity clamping
+                # Apply velocity control to joints
                 for joint in range(self.num_joints):
-                    joint_state = p.getJointState(self.worm_id, joint)
-                    current_velocity = joint_state[1]
+                    # Scale action to velocity with smoother transitions
+                    current_vel = p.getJointState(self.worm_id, joint)[1]
+                    target_vel = action[joint] * self.max_joint_velocity
+                    # Smooth velocity changes
+                    desired_vel = current_vel + np.clip(target_vel - current_vel, -0.1, 0.1)
                     
-                    # Clamp velocity more strictly
-                    if abs(current_velocity) > self.max_joint_velocity:
-                        target_velocity = np.sign(current_velocity) * self.max_joint_velocity
-                        p.setJointMotorControl2(
-                            bodyIndex=self.worm_id,
-                            jointIndex=joint,
-                            controlMode=p.VELOCITY_CONTROL,
-                            targetVelocity=target_velocity,
-                            force=self.torque_scale
-                        )
-                    else:
-                        # Use position control for more stable movement
-                        current_pos = joint_state[0]
-                        target_pos = current_pos + scaled_action[joint] * 0.1  # Small position change
-                        p.setJointMotorControl2(
-                            bodyIndex=self.worm_id,
-                            jointIndex=joint,
-                            controlMode=p.POSITION_CONTROL,
-                            targetPosition=target_pos,
-                            targetVelocity=0,
-                            positionGain=self.position_gain,
-                            velocityGain=self.velocity_gain,
-                            force=self.torque_scale
-                        )
+                    # Use velocity control
+                    p.setJointMotorControl2(
+                        bodyIndex=self.worm_id,
+                        jointIndex=joint,
+                        controlMode=p.VELOCITY_CONTROL,
+                        targetVelocity=desired_vel,
+                        force=self.max_force
+                    )
                 
                 p.stepSimulation()
                 if self.render_mode:
-                    time.sleep(0.001)
+                    time.sleep(self.render_delay)  # Consistent delay for visualization
             
             # Get current state
             worm_pos, orientation = p.getBasePositionAndOrientation(self.worm_id)
             
             # Calculate rewards
             current_distance = np.linalg.norm(np.array(self.food_pos) - np.array(worm_pos))
-            distance_reward = (self.prev_distance_to_food - current_distance) * 10.0  # Reduced weight
+            distance_reward = (self.prev_distance_to_food - current_distance) * 20.0  # Increased weight
             self.prev_distance_to_food = current_distance
             
             # Calculate forward progress
             forward_progress = worm_pos[0] - self.previous_x
             self.previous_x = worm_pos[0]
-            progress_reward = forward_progress * 5.0  # Reduced weight
+            progress_reward = forward_progress * 50.0  # Increased weight
             
-            # Penalize excessive velocity
+            # Softer velocity penalty
             velocity_penalty = 0
             for joint in range(self.num_joints):
                 joint_vel = p.getJointState(self.worm_id, joint)[1]
-                velocity_penalty -= 0.001 * (joint_vel ** 2)
+                velocity_penalty -= 0.0001 * (joint_vel ** 2)  # Reduced penalty
             
-            # Encourage coordinated undulation
+            # Enhanced undulation reward
             undulation_reward = 0.0
-            for i in range(self.num_joints - 1):
-                joint1_state = p.getJointState(self.worm_id, i)[0]
-                joint2_state = p.getJointState(self.worm_id, i + 1)[0]
-                # Reward phase difference between adjacent joints
-                phase_diff = abs(joint1_state - joint2_state)
-                if 0.1 < phase_diff < 0.4:  # Desired phase difference range
-                    undulation_reward += 0.1
+            joint_positions = [p.getJointState(self.worm_id, i)[0] for i in range(self.num_joints)]
             
-            # Encourage staying upright but not too high
+            # Calculate phase differences between adjacent joints
+            for i in range(self.num_joints - 1):
+                phase_diff = abs(joint_positions[i] - joint_positions[i + 1])
+                # Reward proper phase relationships
+                if abs(phase_diff - self.target_phase_diff) < self.phase_tolerance:
+                    undulation_reward += 1.0  # Increased reward
+            
+            # Encourage alternating joint movements
+            for i in range(self.num_joints - 2):
+                if (joint_positions[i] * joint_positions[i + 2]) < 0:  # Opposite signs
+                    undulation_reward += 0.5
+            
+            # Height reward
             height_reward = 0.0
-            if 0.01 < worm_pos[2] < 0.2:  # More lenient height range
-                height_reward = 0.1
-            elif worm_pos[2] >= 0.2:
-                height_reward = -0.05 * (worm_pos[2] - 0.2)
+            if 0.01 < worm_pos[2] < 0.1:  # Tighter height range
+                height_reward = 0.5
+            elif worm_pos[2] >= 0.1:
+                height_reward = -0.1 * (worm_pos[2] - 0.1)
+            
+            # Orientation reward
+            orientation_euler = p.getEulerFromQuaternion(orientation)
+            orientation_penalty = -0.1 * (abs(orientation_euler[0]) + abs(orientation_euler[2]))
             
             # Base reward for staying alive
-            survival_reward = 0.01  # Reduced survival reward
+            survival_reward = 0.1
             
-            # Combine all rewards
+            # Combine all rewards with updated weights
             reward = (
-                distance_reward +
-                progress_reward +
-                velocity_penalty +
-                height_reward +
-                survival_reward +
-                undulation_reward
+                distance_reward * 0.3 +      # Distance to food
+                progress_reward * 0.3 +      # Forward progress
+                velocity_penalty * 0.05 +    # Velocity penalty (reduced weight)
+                height_reward * 0.1 +        # Height maintenance
+                survival_reward * 0.05 +     # Survival
+                undulation_reward * 0.15 +   # Undulation pattern
+                orientation_penalty * 0.05    # Orientation
             )
             
-            # Check food collection
+            # Food collection bonus
             if current_distance < self.food_size * 2:
-                reward += 10.0  # Reduced food reward
+                reward += 20.0  # Increased food reward
                 if not self._spawn_food():
-                    reward -= 5.0
+                    reward -= 1.0  # Reduced penalty
             
             self.steps_since_reset += 1
             
-            # Check termination
+            # Updated termination conditions
             terminated = False
             
-            # More lenient termination conditions
-            if worm_pos[2] < 0.005 or worm_pos[2] > 0.3:  # More lenient height limits
+            if worm_pos[2] < 0.005 or worm_pos[2] > 0.2:  # Updated height limits
                 terminated = True
-                reward = -2.0  # Reduced penalty
+                reward = -1.0  # Reduced penalty
             
-            orientation_euler = p.getEulerFromQuaternion(orientation)
-            if abs(orientation_euler[0]) > 1.5 or abs(orientation_euler[2]) > 1.5:  # More lenient angles
+            if abs(orientation_euler[0]) > 1.0 or abs(orientation_euler[2]) > 1.0:  # More strict angles
                 terminated = True
-                reward = -2.0
-            
-            # Check if any joint velocity is too high
-            for joint in range(self.num_joints):
-                if abs(p.getJointState(self.worm_id, joint)[1]) > self.max_joint_velocity * 2:
-                    terminated = True
-                    reward = -2.0
-                    break
+                reward = -1.0
             
             if self.steps_since_reset >= self.max_steps:
                 terminated = True
             
-            # Print debug info when rendering
+            # Debug info
             if self.render_mode and self.steps_since_reset % 100 == 0:
                 print(f"\nStep {self.steps_since_reset}/{self.max_steps}")
                 print(f"Worm position: {[f'{p:.2f}' for p in worm_pos]}")
                 print(f"Distance to food: {current_distance:.2f}")
                 print(f"Forward progress: {forward_progress:.3f}")
                 print(f"Undulation reward: {undulation_reward:.2f}")
-                print(f"Velocity penalty: {velocity_penalty:.2f}")
                 print(f"Total reward: {reward:.2f}")
             
             return self._get_observation(), reward, terminated, False, {}
@@ -446,11 +475,19 @@ class WormEnv(gym.Env):
         pass
 
     def close(self):
+        # Clean up food object if it exists
+        if self.food_visual_id is not None:
+            try:
+                p.removeBody(self.food_visual_id)
+            except:
+                pass
+            self.food_visual_id = None
+        
+        # Disconnect from physics server
         if self.connected and self.physics_client is not None:
             try:
                 p.disconnect(self.physics_client)
-                self.connected = False
-                self.physics_client = None
-                time.sleep(0.1)
             except:
-                pass 
+                pass
+            self.connected = False
+            self.physics_client = None 
